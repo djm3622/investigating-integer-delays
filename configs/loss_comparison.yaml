@@ -1,0 +1,39 @@
+# Letter loss comparison: losses x excitations x solvers x source counts x clean/40 dB, seed 0.
+datasets:
+  comb: data/vary_all_pluck
+  triangle: data/vary_all_triangle
+losses: [log, lin, tilt, mr_lin, mr_log]
+solvers: [gd, mcmc_pt]
+source_counts: [1, 2, 3, 5, 7]
+snr_db: [null, 40]        # null: clean target
+instances: 16
+instances_drawn: 32       # files are drawn for 32 instances per source count
+selection_seed: 1729
+seed: 0
+model:
+  L_min: 100
+  L_max: 200
+  position_min: 1
+  position_max: 100
+  initial_K: 0.9
+  initial_a: 0.5
+  gain_min: 0.5
+  gain_max: 1.0
+fit:
+  n_fft: 8192
+  search_syntheses: 50000   # per source, charged to either solver's search
+  refine_steps: 20000
+  refine_lr: 0.01
+  gd_steps: 1500
+  log_syntheses: 500
+mcmc_pt:
+  temperatures: [0.01, 0.03, 0.08, 0.2, 0.5, 1.2]
+  # The ladder is multiplied by the loss's scale. Fill in from the run's ladder_scales.json.
+  temperature_scale: {log: null, lin: null, tilt: null, mr_lin: null, mr_log: null}
+  exchange_every: 20
+  swap_move: 0.1
+  continuous_move: 0.3
+  K_step: 0.02
+  a_step: 0.03
+  local_radius: 3
+  local_probability: 0.5
