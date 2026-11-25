@@ -45,8 +45,7 @@ Place the MATLAB-generated targets in `data/vary_all_pluck` (comb) and
 
 Each fit writes `summary.json` under
 `output/loss_comparison/<noise>_<loss>/<excitation>/n<sources>/i<instance>/gd/`;
-finished fits are skipped, so a run can be resumed. The full comparison took
-about 4,100 CPU-hours for ten losses, of which this repository keeps five.
+finished fits are skipped, so a run can be resumed.
 The scorer's bootstrap draws from one shared generator, so its intervals depend
 on which fits are present: the letter's intervals were drawn from an output
 tree that also held the parallel-tempering fits, and scoring a gradient-descent-only
