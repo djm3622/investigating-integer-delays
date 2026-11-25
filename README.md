@@ -18,6 +18,9 @@ history (branch `search-prototypes`).
 - `model/kps/`: comb and triangle models, Lagrange fractional delays, and the
   spectral losses (`log`, `lin`, `tilt`, and the multi-resolution `mr_lin` and
   `mr_log`).
+- `model/effects.py`: feedback-delay effects with their own delay `D`
+  (echo, Schroeder comb, damped comb, Schroeder all-pass), and `StringWithEffect`,
+  which cascades either string model into one of them.
 - `fitting/`: gradient descent with restarts (`gd`) and the parallel-tempering
   search (`mcmc_pt`).
 - `data/`: target loaders, and the test cases (files and noise) of the letter.
