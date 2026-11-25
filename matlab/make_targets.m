@@ -1,27 +1,32 @@
-function make_targets(kind, output_root, grid)
+function make_targets(kind, output_root, params)
 % MAKE_TARGETS  Write the comb or triangle targets of the letter.
 %   make_targets('comb') writes data/vary_all_pluck and make_targets('triangle') writes
 %   data/vary_all_triangle, next to this folder, where the Python loaders look for them.
 %   Each target is a WAV (22025 Hz) and a MAT with its labels; the triangle set also gets
-%   manifest.json. output_root overrides the data folder; grid (a struct with any of the
+%   manifest.json. output_root overrides the data folder; params (a struct with any of the
 %   fields L, a, K, ratio, T) overrides the default parameter grid.
-%   Peaks above 0.95 are scaled down and the scale is stored; the loaders reject such targets.
+%   Peaks above 0.95 are scaled down and the scale is stored: load_comb rejects scaled targets
+%   and load_triangle divides the scale out.
     if nargin < 2 || isempty(output_root)
         output_root = fullfile(fileparts(fileparts(mfilename('fullpath'))), 'data');
     end
     defaults = struct('L', 100:5:200, 'a', 0.1:0.1:0.9, 'K', linspace(0.7, 0.999, 18), ...
                       'ratio', [0.1, 0.3, 0.5], 'T', 40000);
     if nargin < 3
-        grid = struct();
+        params = struct();
+    end
+    unknown = setdiff(fieldnames(params), fieldnames(defaults));
+    if ~isempty(unknown)
+        error('Unknown parameter: %s.', strjoin(unknown, ', '));
     end
     for field = fieldnames(defaults)'
-        if ~isfield(grid, field{1})
-            grid.(field{1}) = defaults.(field{1});
+        if ~isfield(params, field{1})
+            params.(field{1}) = defaults.(field{1});
         end
     end
 
     Fs = 22025;
-    T = grid.T;
+    T = params.T;
     impulse_gain = 1.0;
     headroom = 0.95;
     switch kind
@@ -39,13 +44,13 @@ function make_targets(kind, output_root, grid)
         write_manifest(output_dir, Fs, T);
     end
 
-    for delay_gain = grid.K
-        for a = grid.a
-            for L = grid.L
-                for pluck_position_ratio = grid.ratio
+    for delay_gain = params.K(:)'
+        for a = params.a(:)'
+            for L = params.L(:)'
+                for pluck_position_ratio = params.ratio(:)'
                     p = round(pluck_position_ratio * L);
                     if strcmp(kind, 'comb')
-                        [y, excitation] = comb_pluck(T, L, delay_gain, a, p, max(grid.L));
+                        [y, excitation] = comb_pluck(T, L, delay_gain, a, p, max(params.L));
                     else
                         [y, excitation] = triangle_pluck(T, L, delay_gain, a, p);
                     end
