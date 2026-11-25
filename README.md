@@ -28,6 +28,7 @@ history (branch `search-prototypes`).
   polish, and refinement of `K` and `a`.
 - `fitting/gradient_descent.py`: gradient descent with restarts,
   `fit_gradient_descent`, which runs the stages and keeps the history of a fit.
+- `matlab/`: the target generator (`make_targets`) and the two string models.
 - `data/`: target loaders, and the test cases (files and noise) of the letter.
 - `scripts/`: the loss comparison, its scoring, and the figures.
 - `configs/loss_comparison.yaml`: every setting of the comparison.
@@ -38,8 +39,18 @@ history (branch `search-prototypes`).
 pip install -r requirements.txt
 ```
 
-Place the MATLAB-generated targets in `data/vary_all_pluck` (comb) and
-`data/vary_all_triangle` (triangle). They are not part of this repository.
+The targets are not part of this repository. Generate them in MATLAB from the
+repository root:
+
+```matlab
+addpath matlab
+make_targets('comb')       % writes data/vary_all_pluck
+make_targets('triangle')   % writes data/vary_all_triangle
+```
+
+Each set is 10,206 WAV/MAT pairs at 22,025 Hz: `L` = 100:5:200, `a` = 0.1:0.1:0.9,
+`K` = 18 values from 0.7 to 0.999, and the pluck at 0.1, 0.3 and 0.5 of `L`.
+`matlab/comb_pluck.m` and `matlab/triangle_pluck.m` synthesize one target each.
 
 ## Usage
 
