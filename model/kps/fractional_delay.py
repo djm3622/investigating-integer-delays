@@ -37,7 +37,8 @@ def delayed_loop_filter(numerator: torch.Tensor, delay: torch.Tensor,
 class LagrangeDelayPairMixin:
     """Continuous L and position as parameters, clamped to the grid with round(p) < round(L)."""
 
-    def _init_continuous_pair(self, L_init: float, position_init: float) -> None:
+    def __init__(self, *args, L_init: float, position_init: float, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
         self.delay_len_parameter = nn.Parameter(self.a.new_tensor(L_init))
         self.position_parameter = nn.Parameter(self.a.new_tensor(position_init))
 

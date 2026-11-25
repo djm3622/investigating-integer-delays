@@ -9,170 +9,94 @@ refinement follows. Every stage uses the same loss.
 """
 
 import copy
-import math
+import json
+from pathlib import Path
+import time
+from typing import NamedTuple
 
 import torch
 from torch import nn
 
-from fitting.common import Log, refine, set_a, set_K
-from model.kps.losses import spectral_loss
-from model.kps.pluck import KarplusStrongPluckLagrange
-from model.kps.triangle import KarplusStrongTriangleLagrange
+from fitting.losses import spectral_loss
+from fitting.stages import Loss, Pair, Start, descend, gains_of, polish, refine
+from model.kps import INTEGER_MODELS
 
-MARGIN, K_MAX, A_MAX = 3, 0.9995, 0.99
-CHECKPOINTS = (0.05, 0.1, 0.25, 0.5, 1.0)
+CHECKPOINTS = (0.05, 0.1, 0.25, 0.5, 1.0)  # fractions of the restarts at which the best start is polished
 
 
-def _cosine(start: float, end: float, step: int, steps: int) -> float:
-    return end + 0.5 * (start - end) * (1 + math.cos(math.pi * step / max(steps - 1, 1)))
+class Fit(NamedTuple):
+    """Estimates of every source, the history rows, and the charged syntheses."""
+    pairs: list[Pair]
+    K: list[float]
+    a: list[float]
+    history: list[dict]
+    syntheses: int
 
 
-def _caps(model):
-    """Logit upper bounds for K <= K_MAX and a <= A_MAX; the lower bounds come from the scaling."""
-    unit = (K_MAX - model.gain_min) / (model.gain_max - model.gain_min)
-    return math.log(unit / (1 - unit)), math.log(A_MAX / (1 - A_MAX))
+class History:
+    """Rows of a fit; progress rows are also appended to a JSONL file when a path is given."""
+
+    def __init__(self, path: Path | None) -> None:
+        self.path, self.rows = path, []
+        self.start = time.perf_counter()  # rows carry seconds since the fit started
+
+    def progress(self, calls: int, loss: float, pairs: list[Pair], models: nn.ModuleList) -> None:
+        K, a = gains_of(models)
+        row = {"calls": calls, "seconds": time.perf_counter() - self.start, "loss": float(loss),
+               "pairs": _lists(pairs), "K": K, "a": a}
+        self.rows.append(row)
+        if self.path is not None:
+            with self.path.open("a") as stream:
+                stream.write(json.dumps(row) + "\n")
 
 
-@torch.no_grad()
-def _set_ka(model, K: float, a: float) -> None:
-    set_K(model, K)
-    set_a(model, a)
+def _lists(pairs: list[Pair]) -> list[list[int]]:
+    return [list(pair) for pair in pairs]
 
 
-@torch.no_grad()
-def _clamp_ka(model):
-    k_cap, a_cap = _caps(model)
-    model.delay_gain.clamp_(max=k_cap)
-    model.a.clamp_(max=a_cap)
+def _polish_start(models: nn.ModuleList, start: Start, loss_of: Loss, n: int) -> tuple[list[Pair], int]:
+    """Polish a start's pairs from its K and a."""
+    for model, K, a in zip(models, start.K, start.a):
+        model.set_gains(K, a)
+    return polish(models, start.pairs, loss_of, n)
 
 
-def _draw_start(settings: dict, sources: int):
-    starts = []
-    for _ in range(sources):
-        L = settings["L_min"] + (settings["L_max"] - settings["L_min"]) * float(torch.rand(()))
-        high = min(L - MARGIN, settings["position_max"])
-        starts.append((L, MARGIN + (high - MARGIN) * float(torch.rand(()))))
-    return starts
-
-
-def _rounded(model, valid) -> tuple[int, int]:
-    L = int(round(float(model.delay_len_parameter)))
-    p = min(max(int(round(float(model.position_parameter))), MARGIN), L - MARGIN)
-    if (L, p) not in valid:
-        raise ValueError(f"Rounded pair {(L, p)} is outside the integer grid.")
-    return L, p
-
-
-def _descend(kind, settings, cfg, loss_of, sources, valid):
-    """One start: Adam on (L, p) at 0.3 and (K, a) at 0.01, cosine to 0.01 and 0.001."""
-    n = cfg["n_fft"]
-    model_type = KarplusStrongPluckLagrange if kind == "comb" else KarplusStrongTriangleLagrange
-    models = nn.ModuleList(model_type(**settings, L_init=L, position_init=p)
-                           for L, p in _draw_start(settings, sources))
-    delays = [q for m in models for q in (m.delay_len_parameter, m.position_parameter)]
-    gains = [q for m in models for q in (m.delay_gain, m.a)]
-    optimizer = torch.optim.Adam([{"params": delays}, {"params": gains}])
-    steps = cfg["gd_steps"]
-    for step in range(steps):
-        optimizer.param_groups[0]["lr"] = _cosine(0.3, 0.01, step, steps)
-        optimizer.param_groups[1]["lr"] = _cosine(0.01, 0.001, step, steps)
-        optimizer.zero_grad()
-        loss_of(sum(m.lagrange_synth(n) for m in models)).backward()
-        optimizer.step()
-        with torch.no_grad():
-            for m in models:
-                m.delay_len_parameter.clamp_(settings["L_min"], settings["L_max"])
-                m.position_parameter.clamp_(MARGIN, min(float(m.delay_len_parameter) - MARGIN,
-                                                        settings["position_max"]))
-                _clamp_ka(m)
-    with torch.no_grad():
-        pairs = [_rounded(m, valid[i]) for i, m in enumerate(models)]
-        for m, (L, p) in zip(models, pairs):
-            m.delay_len_parameter.fill_(L)
-            m.position_parameter.fill_(p)
-        loss = float(loss_of(sum(m.lagrange_synth(n) for m in models)))
-    return (loss, pairs, [float(m.scaled_gain().detach()) for m in models],
-            [float(m.scaled_allpass().detach()) for m in models])
-
-
-def _polish(models, pairs, loss_of, n, valid, calls):
-    """For each source (two passes when S > 1), try L +/- 1 and the mirrored position."""
-    sources = len(models)
-    for _ in range(2 if sources > 1 else 1):
-        for i in range(sources):
-            with torch.no_grad():
-                rest = sum((models[j].time_domain_synth(n, *pairs[j]) for j in range(sources) if j != i),
-                           torch.zeros(n))
-            calls += sources - 1
-            L, p = pairs[i]
-            candidates = []
-            for dL in (0, -1, 1):
-                for q in (p, L + dL - p):
-                    pair = (L + dL, q)
-                    if MARGIN <= q <= L + dL - MARGIN and pair in valid[i] and pair not in candidates:
-                        candidates.append(pair)
-            K0, best = float(models[i].scaled_gain().detach()), None
-            for pair in candidates:
-                for a0 in (0.2, 0.7):
-                    _set_ka(models[i], K0, a0)
-                    optimizer = torch.optim.Adam([{"params": [models[i].delay_gain]},
-                                                  {"params": [models[i].a]}])
-                    for step in range(120):
-                        optimizer.param_groups[0]["lr"] = _cosine(0.02, 0.001, step, 120)
-                        optimizer.param_groups[1]["lr"] = _cosine(0.05, 0.002, step, 120)
-                        optimizer.zero_grad()
-                        loss_of(rest + models[i].time_domain_synth(n, *pair)).backward()
-                        optimizer.step()
-                        _clamp_ka(models[i])
-                    with torch.no_grad():
-                        score = float(loss_of(rest + models[i].time_domain_synth(n, *pair)))
-                    calls += 121
-                    if best is None or score < best[0]:
-                        best = (score, pair, float(models[i].scaled_gain()), float(models[i].scaled_allpass()))
-            pairs[i] = best[1]
-            _set_ka(models[i], best[2], best[3])
-    return pairs, calls
-
-
-def fit_gradient_descent(models: nn.ModuleList, target, cfg, kind: str, settings: dict, log_path=None):
-    """Return (history, charged syntheses); leaves `models` (integer) at the polished, refined pairs."""
-    n, sources = cfg["n_fft"], len(models)
+def fit_gradient_descent(kind: str, sources: int, target: torch.Tensor, loss: str, model_settings: dict,
+                         fit_settings: dict, log_path: Path | None = None) -> Fit:
+    """Fit `sources` strings of excitation `kind` to the first n_fft samples of the target."""
+    n, steps = fit_settings["n_fft"], fit_settings["gd_steps"]
     spectrum = torch.fft.rfft(target[:n])
-    loss_of = lambda x: spectral_loss(x, spectrum, cfg["loss"])
-    valid = [set(m.all_pairs()) for m in models]
-    log = Log(log_path, cfg["log_syntheses"])
-    restarts = max(cfg["search_syntheses"] // (cfg["gd_steps"] + 1), 1)
-    checkpoints = {max(round(f * restarts), 1) for f in CHECKPOINTS}
-    calls, losses, best, checkpoint_rows, checkpoint_calls = 0, [], None, [], 0
-    for start in range(restarts):
-        result = _descend(kind, settings, cfg, loss_of, sources, valid)
-        calls += sources * (cfg["gd_steps"] + 1)
-        losses.append(result[0])
-        if best is None or result[0] < best[1][0]:
-            best = (start, result)
-        log(calls, result[0], result[1], models, force=True)
-        if start + 1 in checkpoints:
+    loss_of = lambda x: spectral_loss(x, spectrum, loss)
+    models = nn.ModuleList(INTEGER_MODELS[kind](**model_settings) for _ in range(sources))
+    history = History(log_path)
+    restarts = max(fit_settings["search_syntheses"] // (steps + 1), 1)
+    checkpoints = {max(round(fraction * restarts), 1) for fraction in CHECKPOINTS}
+    calls, starts, best, checkpoint_rows = 0, [], 0, []
+    for index in range(restarts):
+        starts.append(descend(kind, sources, model_settings, loss_of, n, steps))
+        calls += sources * (steps + 1)
+        if starts[index].loss < starts[best].loss:
+            best = index
+        # K and a of these rows are the models' initial values: the models are first set by the polish.
+        history.progress(calls, starts[index].loss, starts[index].pairs, models)
+        if index + 1 in checkpoints:
             # Polish a copy of the best start so far; its cost is logged, not charged.
-            trial = copy.deepcopy(models)
-            for i in range(sources):
-                _set_ka(trial[i], best[1][2][i], best[1][3][i])
-            polished, used = _polish(trial, list(best[1][1]), loss_of, n, valid, 0)
-            checkpoint_calls += used
-            checkpoint_rows.append({"starts": start + 1, "calls": calls, "seconds": log.rows[-1]["seconds"],
-                                    "best_start": best[0], "pairs_before_polish": [list(p) for p in best[1][1]],
-                                    "pairs_after_polish": [list(p) for p in polished], "polish_syntheses": used})
-    descent_calls = calls
-    _, (chosen_loss, pairs, K, a) = best
-    before = list(pairs)
-    for i in range(sources):
-        _set_ka(models[i], K[i], a[i])
-    pairs, calls = _polish(models, list(pairs), loss_of, n, valid, calls)
-    log.rows.append({"calls": calls, "descent_syntheses": descent_calls,
-                     "polish_syntheses": calls - descent_calls,
-                     "refine_syntheses": cfg["refine_steps"] * sources,
-                     "restarts": restarts, "chosen_restart": best[0],
-                     "checkpoints": checkpoint_rows, "checkpoint_polish_syntheses_uncharged": checkpoint_calls,
-                     "chosen_restart_loss": chosen_loss, "restart_losses": losses,
-                     "pairs_before_polish": [list(p) for p in before],
-                     "pairs_after_polish": [list(p) for p in pairs]})
-    return log.rows, refine(models, pairs, spectrum, cfg, log, calls)
+            polished, used = _polish_start(copy.deepcopy(models), starts[best], loss_of, n)
+            checkpoint_rows.append({"starts": index + 1, "calls": calls, "seconds": history.rows[-1]["seconds"],
+                                    "best_start": best, "pairs_before_polish": _lists(starts[best].pairs),
+                                    "pairs_after_polish": _lists(polished), "polish_syntheses": used})
+    pairs, polish_calls = _polish_start(models, starts[best], loss_of, n)
+    refine_calls = fit_settings["refine_steps"] * sources
+    history.rows.append({"calls": calls + polish_calls, "descent_syntheses": calls,
+                         "polish_syntheses": polish_calls, "refine_syntheses": refine_calls,
+                         "restarts": restarts, "chosen_restart": best, "checkpoints": checkpoint_rows,
+                         "checkpoint_polish_syntheses_uncharged": sum(row["polish_syntheses"]
+                                                                      for row in checkpoint_rows),
+                         "chosen_restart_loss": starts[best].loss,
+                         "restart_losses": [start.loss for start in starts],
+                         "pairs_before_polish": _lists(starts[best].pairs),
+                         "pairs_after_polish": _lists(pairs)})
+    calls += polish_calls + refine_calls
+    final_loss = refine(models, pairs, loss_of, n, fit_settings["refine_steps"], fit_settings["refine_lr"])
+    history.progress(calls, final_loss, pairs, models)
+    return Fit(pairs, *gains_of(models), history.rows, calls)

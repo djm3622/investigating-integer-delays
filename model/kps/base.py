@@ -1,6 +1,9 @@
 """Karplus--Strong loop with learnable gain K and all-pass coefficient a on an integer (L, p) grid."""
 
+import math
+
 import torch
+import torchaudio
 from torch import nn
 
 
@@ -8,7 +11,7 @@ class KarplusStrong(nn.Module):
     """K in (gain_min, gain_max) and a in (0, 1) are sigmoids of learned scalars; (L, p) is an integer pair.
 
     The loop filter is (a/2 + (a + 1)/2 z^-1 + 1/2 z^-2) / (1 + a z^-1): a two-tap average and an all-pass.
-    Valid pairs satisfy p < L.
+    Valid pairs satisfy p < L. Subclasses supply the excitation that drives the loop.
     """
 
     def __init__(self, L_min: int, L_max: int, position_min: int, position_max: int,
@@ -27,7 +30,6 @@ class KarplusStrong(nn.Module):
         self.delay_gain = nn.Parameter(torch.logit(torch.tensor(
             (initial_K - gain_min) / (gain_max - gain_min), dtype=torch.get_default_dtype())))
         self.a = nn.Parameter(torch.logit(torch.tensor(initial_a, dtype=torch.get_default_dtype())))
-        self.pair: tuple[int, int] | None = None
 
     def scaled_gain(self) -> torch.Tensor:
         unit_gain = torch.sigmoid(self.delay_gain)
@@ -42,18 +44,37 @@ class KarplusStrong(nn.Module):
     def scaled_allpass(self) -> torch.Tensor:
         return torch.sigmoid(self.a)
 
-    def all_pairs(self) -> list[tuple[int, int]]:
-        return [(L, p) for L in range(self.L_min, self.L_max + 1)
-                for p in range(self.position_min, self.position_max + 1) if p < L]
+    def gains(self) -> tuple[float, float]:
+        """K and a as numbers."""
+        return float(self.scaled_gain().detach()), float(self.scaled_allpass().detach())
+
+    @torch.no_grad()
+    def set_gains(self, K: float, a: float) -> None:
+        unit = min(max((K - self.gain_min) / (self.gain_max - self.gain_min), 1e-4), 1 - 1e-4)
+        self.delay_gain.copy_(torch.logit(self.delay_gain.new_tensor(unit)))
+        self.a.copy_(torch.logit(self.a.new_tensor(min(max(a, 1e-4), 1 - 1e-4))))
+
+    @torch.no_grad()
+    def clamp_gains(self, K_max: float, a_max: float) -> None:
+        """Keep K <= K_max and a <= a_max; the lower bounds come from the scaling."""
+        unit = (K_max - self.gain_min) / (self.gain_max - self.gain_min)
+        self.delay_gain.clamp_(max=math.log(unit / (1 - unit)))
+        self.a.clamp_(max=math.log(a_max / (1 - a_max)))
 
     def is_valid(self, pair: tuple[int, int]) -> bool:
         L, p = pair
         return self.L_min <= L <= self.L_max and self.position_min <= p <= self.position_max and p < L
 
-    def select_pair(self, pair: tuple[int, int]) -> None:
-        if not self.is_valid(pair):
-            raise ValueError("Pair is outside the valid candidate grid.")
-        self.pair = (int(pair[0]), int(pair[1]))
+    def excitation(self, n_samples: int, L: int, p: int, K: torch.Tensor) -> torch.Tensor:
+        """Input of the loop for the pair (L, p)."""
+        raise NotImplementedError
+
+    def time_domain_synth(self, n_samples: int, L: int, p: int) -> torch.Tensor:
+        """Causal response at the integer pair (L, p)."""
+        if not self.is_valid((L, p)):
+            raise ValueError("Expected a valid candidate pair.")
+        K, denominator, b = self._integer_filter(L)
+        return torchaudio.functional.lfilter(self.excitation(n_samples, L, p, K), denominator, b, clamp=False)
 
     def _loop_numerator(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         K, a = self.scaled_gain(), self.scaled_allpass()

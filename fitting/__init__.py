@@ -1,1 +1,1 @@
-"""Solvers: gradient descent with restarts and parallel-tempering search."""
+"""Spectral losses and gradient descent with restarts."""
