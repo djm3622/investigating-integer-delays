@@ -8,10 +8,9 @@ from scipy.signal import lfilter
 import yaml
 
 from data.cases import ROOT, make_cases
+from fitting.losses import EPS, TILT_CUTOFF
 
 N = 8192
-EPS = 1e-7
-TILT_CUTOFF = 2 * np.pi / 400
 
 
 def single_source_cases() -> list[dict]:

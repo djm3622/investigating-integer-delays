@@ -19,6 +19,12 @@ def triangle(n_samples: int, L: int | torch.Tensor, A: int | torch.Tensor,
     return torch.where(n <= A, n / A, torch.clamp((L - n) / (L - A), min=0))
 
 
+def _checked(output: torch.Tensor) -> torch.Tensor:
+    if not bool(torch.isfinite(output).all()):
+        raise FloatingPointError("Nonfinite causal triangle output.")
+    return output
+
+
 class KarplusStrongTriangle(KarplusStrong):
     """String pulled aside at p = A and released: the loop is driven by -K times a triangle."""
 
@@ -27,29 +33,15 @@ class KarplusStrongTriangle(KarplusStrong):
         return -K * triangle(n_samples, L, A, self.a)
 
     def time_domain_synth(self, n_samples: int, L: int, p: int) -> torch.Tensor:
-        if not self.is_valid((L, p)):
-            raise ValueError("Expected a valid candidate pair.")
-        K, denominator, b = self._integer_filter(L)
-        output = torchaudio.functional.lfilter(self.excitation(n_samples, L, p, K), denominator, b,
-                                               clamp=False)
-        if not bool(torch.isfinite(output).all()):
-            raise FloatingPointError("Nonfinite causal triangle output.")
-        return output
+        return _checked(super().time_domain_synth(n_samples, L, p))
 
 
 class KarplusStrongTriangleLagrange(LagrangeDelayPairMixin, KarplusStrongTriangle):
     """Continuous L and A; causal synthesis with a Lagrange fractional loop delay."""
 
-    def __init__(self, *args, L_init: float, position_init: float, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._init_continuous_pair(L_init, position_init)
-
     def lagrange_synth(self, n_samples: int) -> torch.Tensor:
         L, A = self.continuous_L(), self.continuous_position()
         size = int(L.detach().floor()) + 8
         K, numerator, denominator = self._loop_coefficients(L, size)
-        output = torchaudio.functional.lfilter(
-            self.excitation(n_samples, L, A, K), denominator, F.pad(numerator, (0, size - 3)), clamp=False)
-        if not bool(torch.isfinite(output).all()):
-            raise FloatingPointError("Nonfinite causal triangle output.")
-        return output
+        return _checked(torchaudio.functional.lfilter(
+            self.excitation(n_samples, L, A, K), denominator, F.pad(numerator, (0, size - 3)), clamp=False))

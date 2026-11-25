@@ -35,7 +35,7 @@ def make_cases(config: dict) -> list[dict]:
 def add_target_noise(target: torch.Tensor, case: dict, snr_db: float, config: dict) -> torch.Tensor:
     """White Gaussian noise at snr_db over the fitted first n_fft samples.
 
-    The realization depends only on the case, so every loss and solver sees the same noise.
+    The realization depends only on the case, so every loss sees the same noise.
     """
     key = f"{config['selection_seed']}:{case['filter']}:{case['source_count']}:{case['instance']}:noise"
     generator = torch.Generator().manual_seed(
