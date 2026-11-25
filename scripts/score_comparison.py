@@ -10,6 +10,7 @@ import numpy as np
 from scipy.stats import wilcoxon
 
 from data.cases import ROOT
+from scripts.run_comparison import SOLVER
 
 rng = np.random.default_rng(20261119)
 GRID = np.linspace(0.001, 0.999, 999)
@@ -50,7 +51,7 @@ def bootstrap_interval(values: np.ndarray) -> tuple[float, float]:
 def load(root: Path) -> list[dict]:
     """One row per finished fit, with how many of its starts had every source right before the polish."""
     fits = []
-    for path in sorted(root.glob("*/*/n*/i*/gd/summary.json")):
+    for path in sorted(root.glob(f"*/*/n*/i*/{SOLVER}/summary.json")):
         s = json.loads(path.read_text())
         true = [(t["L"], t["position"]) for t in s["true"]]
         starts = s["history"][:next(h["restarts"] for h in s["history"] if "restarts" in h)]

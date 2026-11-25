@@ -50,6 +50,11 @@ class History:
                 stream.write(json.dumps(row) + "\n")
 
 
+    def summary(self, row: dict) -> None:
+        """The closing row of the fit (not written to the progress log)."""
+        self.rows.append(row)
+
+
 def _lists(pairs: list[Pair]) -> list[list[int]]:
     return [list(pair) for pair in pairs]
 
@@ -87,15 +92,15 @@ def fit_gradient_descent(kind: str, sources: int, target: torch.Tensor, loss: st
                                     "pairs_after_polish": _lists(polished), "polish_syntheses": used})
     pairs, polish_calls = _polish_start(models, starts[best], loss_of, n)
     refine_calls = fit_settings["refine_steps"] * sources
-    history.rows.append({"calls": calls + polish_calls, "descent_syntheses": calls,
-                         "polish_syntheses": polish_calls, "refine_syntheses": refine_calls,
-                         "restarts": restarts, "chosen_restart": best, "checkpoints": checkpoint_rows,
-                         "checkpoint_polish_syntheses_uncharged": sum(row["polish_syntheses"]
-                                                                      for row in checkpoint_rows),
-                         "chosen_restart_loss": starts[best].loss,
-                         "restart_losses": [start.loss for start in starts],
-                         "pairs_before_polish": _lists(starts[best].pairs),
-                         "pairs_after_polish": _lists(pairs)})
+    history.summary({"calls": calls + polish_calls, "descent_syntheses": calls,
+                     "polish_syntheses": polish_calls, "refine_syntheses": refine_calls,
+                     "restarts": restarts, "chosen_restart": best, "checkpoints": checkpoint_rows,
+                     "checkpoint_polish_syntheses_uncharged": sum(row["polish_syntheses"]
+                                                                  for row in checkpoint_rows),
+                     "chosen_restart_loss": starts[best].loss,
+                     "restart_losses": [start.loss for start in starts],
+                     "pairs_before_polish": _lists(starts[best].pairs),
+                     "pairs_after_polish": _lists(pairs)})
     calls += polish_calls + refine_calls
     final_loss = refine(models, pairs, loss_of, n, fit_settings["refine_steps"], fit_settings["refine_lr"])
     history.progress(calls, final_loss, pairs, models)
